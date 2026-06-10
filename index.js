@@ -108,13 +108,26 @@ bot.onText(/\/help/, async (msg) => {
   const chatId = msg.chat.id;
   await bot.sendMessage(
     chatId,
-    '📋 *Доступные команды:*\n\n' +
-    '/start — Начать работу с ботом\n' +
-    '/help — Показать это сообщение\n' +
-    '/forget — Очистить историю диалога\n' +
-    '/roleplay — Режим тренировки (AI играет роль клиента)\n' +
-    '/stats — Статистика (только для администратора)\n\n' +
-    '💬 Просто напишите сообщение, и я отвечу!',
+    'Привет! Я твой личный помощник по продажам 🤖\n\n' +
+    'Я помогаю тебе работать с клиентами. Ты общаешься с клиентом сам — я подсказываю что делать и что писать.\n\n' +
+    '━━━━━━━━━━━━━━━\n\n' +
+    'КАК ПОЛЬЗОВАТЬСЯ:\n\n' +
+    '1️⃣ Нажми на команду из меню (кнопка / внизу)\n\n' +
+    '2️⃣ Бот спросит детали о клиенте\n\n' +
+    '3️⃣ Отвечай подробно — чем больше напишешь, тем лучше совет\n\n' +
+    '4️⃣ Получи готовый план или текст сообщения\n\n' +
+    '━━━━━━━━━━━━━━━\n\n' +
+    'ЧТО УМЕЮ:\n\n' +
+    '/strategy — Не знаешь что делать с клиентом? Опиши его — дам план\n\n' +
+    '/meeting — Провёл встречу? Расскажи как прошло — разберём ошибки и следующий шаг\n\n' +
+    '/objection — Клиент сказал «дорого» или «подумаю»? Напиши что именно — дам ответ\n\n' +
+    '/stuck — Клиент пропал или тянет время? Опиши ситуацию — найдём причину\n\n' +
+    '/roleplay — Хочешь потренироваться? Сыграю роль клиента перед реальной встречей\n\n' +
+    '/forget — Начинаешь новый вопрос? Нажми чтобы очистить историю\n\n' +
+    '━━━━━━━━━━━━━━━\n\n' +
+    '⚠️ ВАЖНО:\n\n' +
+    'Всегда пиши КТО клиент, ОТКУДА, какой БЮДЖЕТ и что УЖЕ было.\n\n' +
+    'Без деталей — совет будет бесполезным.',
     { parse_mode: 'Markdown' }
   );
 });
@@ -128,6 +141,66 @@ bot.onText(/\/forget/, async (msg) => {
   } catch (err) {
     console.error('/forget error:', err);
     await bot.sendMessage(chatId, '❌ Ошибка при очистке истории.');
+  }
+});
+
+bot.onText(/\/strategy/, async (msg) => {
+  const chatId = msg.chat.id;
+  try {
+    await clearHistory(chatId);
+    roleplaySessions.delete(chatId);
+    await bot.sendMessage(
+      chatId,
+      'Опиши клиента: имя, откуда, бюджет, мотив, на каком этапе, что последнее было. Дам конкретный план.'
+    );
+  } catch (err) {
+    console.error('/strategy error:', err);
+    await bot.sendMessage(chatId, '❌ Произошла ошибка. Попробуйте позже.');
+  }
+});
+
+bot.onText(/\/objection/, async (msg) => {
+  const chatId = msg.chat.id;
+  try {
+    await clearHistory(chatId);
+    roleplaySessions.delete(chatId);
+    await bot.sendMessage(
+      chatId,
+      'Какое возражение? Напиши точную фразу клиента и коротко контекст (кто клиент, этап).'
+    );
+  } catch (err) {
+    console.error('/objection error:', err);
+    await bot.sendMessage(chatId, '❌ Произошла ошибка. Попробуйте позже.');
+  }
+});
+
+bot.onText(/\/meeting/, async (msg) => {
+  const chatId = msg.chat.id;
+  try {
+    await clearHistory(chatId);
+    roleplaySessions.delete(chatId);
+    await bot.sendMessage(
+      chatId,
+      'Расскажи что было на встрече: кто клиент, что говорил, чем закончили, на что согласился или нет.'
+    );
+  } catch (err) {
+    console.error('/meeting error:', err);
+    await bot.sendMessage(chatId, '❌ Произошла ошибка. Попробуйте позже.');
+  }
+});
+
+bot.onText(/\/stuck/, async (msg) => {
+  const chatId = msg.chat.id;
+  try {
+    await clearHistory(chatId);
+    roleplaySessions.delete(chatId);
+    await bot.sendMessage(
+      chatId,
+      'Опиши ситуацию: кто клиент, сколько касаний было, что последнее происходило, сколько дней молчит.'
+    );
+  } catch (err) {
+    console.error('/stuck error:', err);
+    await bot.sendMessage(chatId, '❌ Произошла ошибка. Попробуйте позже.');
   }
 });
 
