@@ -76,7 +76,13 @@ async function askClaude(messages, systemPrompt) {
   const response = await anthropic.messages.create({
     model: 'claude-sonnet-4-6',
     max_tokens: 2000,
-    system: systemPrompt,
+    system: [
+      {
+        type: 'text',
+        text: systemPrompt,
+        cache_control: { type: 'ephemeral' },
+      },
+    ],
     messages,
   });
   return response.content[0].text;
