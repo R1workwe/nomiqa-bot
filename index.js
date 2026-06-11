@@ -13,20 +13,30 @@ const awaitingName = new Set(); // chat_ids ожидающих ввода име
 
 // ---------- Managers ----------
 
-async function getManagerName(chatId) {
-  const { data } = await supabase
-    .from('managers')
-    .select('name')
-    .eq('chat_id', String(chatId))
-    .single();
-  return data?.name ?? null;
+function isAdmin(chatId) {
+  const adminId = process.env.ADMIN_CHAT_ID;
+  return Boolean(adminId) && String(chatId) === String(adminId);
 }
 
-async function saveManager(chatId, name) {
+async function getManager(chatId) {
+  const { data } = await supabase
+    .from('managers')
+    .select('full_name, role')
+    .eq('chat_id', String(chatId))
+    .single();
+  return data ?? null;
+}
+
+async function saveManager(chatId, fullName) {
+  const role = isAdmin(chatId) ? 'admin' : 'manager';
   const { error } = await supabase
     .from('managers')
-    .upsert({ chat_id: String(chatId), name }, { onConflict: 'chat_id' });
+    .upsert(
+      { chat_id: String(chatId), full_name: fullName, role },
+      { onConflict: 'chat_id' }
+    );
   if (error) throw error;
+  return role;
 }
 
 // ---------- Analytics ----------
@@ -93,16 +103,16 @@ async function askClaude(messages, systemPrompt) {
 bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
   try {
-    const existingName = await getManagerName(chatId);
-    if (existingName) {
+    const manager = await getManager(chatId);
+    if (manager?.full_name) {
       await bot.sendMessage(
         chatId,
-        `👋 С возвращением, *${existingName}*!\n\nЯ готов помочь. Используйте /help для списка команд.`,
+        `👋 С возвращением, *${manager.full_name}*!\n\nЯ готов помочь. Используйте /help для списка команд.`,
         { parse_mode: 'Markdown' }
       );
     } else {
       awaitingName.add(chatId);
-      await bot.sendMessage(chatId, '👋 Привет! Я корпоративный ассистент компании *Nomiqa*.\n\nКак тебя зовут?', { parse_mode: 'Markdown' });
+      await bot.sendMessage(chatId, '👋 Привет! Я корпоративный ассистент компании *Nomiqa*.\n\nДавай зарегистрируемся. Введите ваше имя и фамилию (например: Иван Петров):', { parse_mode: 'Markdown' });
     }
   } catch (err) {
     console.error('/start error:', err);
@@ -135,6 +145,15 @@ bot.onText(/\/help/, async (msg) => {
     'Всегда пиши КТО клиент, ОТКУДА, какой БЮДЖЕТ и что УЖЕ было.\n\n' +
     'Без деталей — совет будет бесполезным.',
     { parse_mode: 'Markdown' }
+  );
+});
+
+bot.onText(/\/register/, async (msg) => {
+  const chatId = msg.chat.id;
+  awaitingName.add(chatId);
+  await bot.sendMessage(
+    chatId,
+    '📝 Регистрация.\n\nВведите ваше имя и фамилию (например: Иван Петров):'
   );
 });
 
@@ -231,61 +250,76 @@ bot.onText(/\/roleplay/, async (msg) => {
 
 bot.onText(/\/stats/, async (msg) => {
   const chatId = msg.chat.id;
-  const adminId = process.env.ADMIN_CHAT_ID;
-
-  if (!adminId || String(chatId) !== String(adminId)) {
-    await bot.sendMessage(chatId, '⛔ У вас нет доступа к этой команде.');
-    return;
-  }
 
   try {
-    await bot.sendChatAction(chatId, 'typing');
-
-    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-
-    const { data: rows } = await supabase
-      .from('analytics')
-      .select('chat_id, manager_name, query_text, created_at')
-      .gte('created_at', sevenDaysAgo)
-      .order('created_at', { ascending: false });
-
-    const analytics = rows || [];
-
-    // Топ-10 последних запросов
-    const top10 = analytics.slice(0, 10);
-
-    // Активность по менеджерам (первое вхождение = последний запрос, т.к. сортировка desc)
-    const managerMap = {};
-    for (const row of analytics) {
-      if (!managerMap[row.manager_name]) {
-        managerMap[row.manager_name] = { count: 0, lastQuery: row.query_text, lastAt: row.created_at };
-      }
-      managerMap[row.manager_name].count++;
+    const manager = await getManager(chatId);
+    if (manager?.role !== 'admin') {
+      await bot.sendMessage(chatId, 'У вас нет доступа к статистике');
+      return;
     }
 
-    // Формируем сообщение
-    let text = '📊 *Статистика за последние 7 дней*\n\n';
+    await bot.sendChatAction(chatId, 'typing');
 
-    text += '🔝 *Топ-10 последних запросов:*\n';
+    const now = Date.now();
+    const WEEK = 7 * 24 * 60 * 60 * 1000;
+    const since = new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString();
+
+    const [{ data: rows }, { data: mgrRows }] = await Promise.all([
+      supabase
+        .from('analytics')
+        .select('chat_id, query_text, created_at')
+        .gte('created_at', since),
+      supabase
+        .from('managers')
+        .select('chat_id, full_name'),
+    ]);
+
+    const analytics = rows || [];
+    const managers = mgrRows || [];
+
+    // Топ-10 популярных запросов за 30 дней (по частоте)
+    const queryCounts = {};
+    for (const r of analytics) {
+      const key = (r.query_text || '').trim();
+      if (!key) continue;
+      queryCounts[key] = (queryCounts[key] || 0) + 1;
+    }
+    const top10 = Object.entries(queryCounts)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10);
+
+    // Запросы по менеджерам с разбивкой по неделям (0 = текущая ... 3 = -3)
+    const weekly = {}; // chat_id -> [w0, w1, w2, w3]
+    for (const r of analytics) {
+      const idx = Math.floor((now - new Date(r.created_at).getTime()) / WEEK);
+      if (idx < 0 || idx > 3) continue;
+      const id = String(r.chat_id);
+      if (!weekly[id]) weekly[id] = [0, 0, 0, 0];
+      weekly[id][idx]++;
+    }
+
+    let text = '📊 *Статистика*\n\n';
+
+    text += '🔝 *Топ-10 популярных запросов (30 дней):*\n';
     if (top10.length === 0) {
       text += '_Нет данных_\n';
     } else {
-      top10.forEach((r, i) => {
-        const preview = r.query_text.length > 60 ? r.query_text.slice(0, 60) + '…' : r.query_text;
-        text += `${i + 1}. [${r.manager_name}] ${preview}\n`;
+      top10.forEach(([q, count], i) => {
+        const preview = q.length > 60 ? q.slice(0, 60) + '…' : q;
+        text += `${i + 1}. (${count}) ${preview}\n`;
       });
     }
 
-    text += '\n👥 *Активность менеджеров:*\n';
-    const managers = Object.entries(managerMap).sort((a, b) => b[1].count - a[1].count);
+    text += '\n👥 *Запросы по менеджерам (по неделям):*\n';
+    text += '_формат: текущая / −1 / −2 / −3 неделя_\n';
     if (managers.length === 0) {
-      text += '_Нет данных_\n';
+      text += '_Нет зарегистрированных менеджеров_\n';
     } else {
-      for (const [name, info] of managers) {
-        const date = new Date(info.lastAt).toLocaleDateString('ru-RU');
-        const lastPreview = info.lastQuery.length > 50 ? info.lastQuery.slice(0, 50) + '…' : info.lastQuery;
-        text += `\n*${name}* — ${info.count} запр.\n`;
-        text += `└ последний (${date}): ${lastPreview}\n`;
+      for (const m of managers) {
+        const w = weekly[String(m.chat_id)] || [0, 0, 0, 0];
+        const total = w[0] + w[1] + w[2] + w[3];
+        text += `\n*${m.full_name || 'Без имени'}* — всего ${total}\n`;
+        text += `└ ${w[0]} / ${w[1]} / ${w[2]} / ${w[3]}\n`;
       }
     }
 
@@ -304,20 +338,25 @@ bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const userMessage = msg.text;
 
-  // Обработка ввода имени
+  // Обработка ввода имени (регистрация)
   if (awaitingName.has(chatId)) {
+    const fullName = userMessage.trim().replace(/\s+/g, ' ');
+    if (fullName.split(' ').length < 2) {
+      await bot.sendMessage(chatId, 'Пожалуйста, введите имя и фамилию (два слова), например: Иван Петров.');
+      return; // остаёмся в режиме ожидания имени
+    }
     awaitingName.delete(chatId);
-    const name = userMessage.trim();
     try {
-      await saveManager(chatId, name);
+      const role = await saveManager(chatId, fullName);
+      const adminNote = role === 'admin' ? '\n\n🔑 Вам предоставлены права администратора.' : '';
       await bot.sendMessage(
         chatId,
-        `Приятно познакомиться, *${name}*! 🤝\n\nЯ готов помочь. Используйте /help для списка команд.`,
+        `Приятно познакомиться, *${fullName}*! 🤝${adminNote}\n\nЯ готов помочь. Используйте /help для списка команд.`,
         { parse_mode: 'Markdown' }
       );
     } catch (err) {
       console.error('Save manager error:', err);
-      await bot.sendMessage(chatId, '❌ Не удалось сохранить имя. Попробуйте /start ещё раз.');
+      await bot.sendMessage(chatId, '❌ Не удалось сохранить имя. Попробуйте /register ещё раз.');
     }
     return;
   }
@@ -325,14 +364,14 @@ bot.on('message', async (msg) => {
   try {
     await bot.sendChatAction(chatId, 'typing');
 
-    const [history, managerName] = await Promise.all([
+    const [history, manager] = await Promise.all([
       getHistory(chatId),
-      getManagerName(chatId),
+      getManager(chatId),
     ]);
 
     await Promise.all([
       saveMessage(chatId, 'user', userMessage),
-      saveAnalytics(chatId, managerName ?? 'Неизвестный', userMessage),
+      saveAnalytics(chatId, manager?.full_name ?? 'Неизвестный', userMessage),
     ]);
 
     const messages = [...history, { role: 'user', content: userMessage }];
