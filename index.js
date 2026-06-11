@@ -1,12 +1,15 @@
 require('dotenv').config();
 const fs = require('fs');
+const os = require('os');
 const TelegramBot = require('node-telegram-bot-api');
 const { createClient } = require('@supabase/supabase-js');
 const Anthropic = require('@anthropic-ai/sdk');
+const Groq = require('groq-sdk');
 
 const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 const roleplaySessions = new Set();
 const awaitingName = new Set(); // chat_ids ожидающих ввода имени
@@ -460,6 +463,40 @@ bot.onText(/^\/manager(?:@\w+)?(?:\s+(.+))?$/, async (msg, match) => {
   }
 });
 
+// ---------- Query processing ----------
+
+// Общий конвейер обработки запроса (текст или распознанная речь)
+async function processQuery(chatId, userMessage) {
+  try {
+    await bot.sendChatAction(chatId, 'typing');
+
+    const [history, manager] = await Promise.all([
+      getHistory(chatId),
+      getManager(chatId),
+    ]);
+
+    await Promise.all([
+      saveMessage(chatId, 'user', userMessage),
+      saveAnalytics(chatId, manager?.full_name ?? 'Неизвестный', userMessage),
+    ]);
+
+    const messages = [...history, { role: 'user', content: userMessage }];
+
+    const systemPrompt = roleplaySessions.has(chatId)
+      ? `Ты играешь роль потенциального клиента компании Nomiqa. Ты заинтересован в продуктах и услугах, но задаёшь уточняющие вопросы и иногда возражаешь. Веди себя как реальный клиент: интересуйся ценами, сроками, гарантиями и условиями. Иногда будь скептичен, иногда заинтересован. Не раскрывай, что ты AI. Отвечай только на русском языке.`
+      : process.env.SYSTEM_PROMPT;
+
+    const reply = await askClaude(messages, systemPrompt);
+    await saveMessage(chatId, 'assistant', reply);
+    await bot.sendMessage(chatId, reply);
+  } catch (err) {
+    const errLine = `[${new Date().toISOString()}] chat_id=${chatId} ${err?.status ?? ''} ${err?.message ?? err}\n`;
+    console.error('Error processing message:', err);
+    fs.appendFileSync('error.log', errLine);
+    await bot.sendMessage(chatId, '❌ Произошла ошибка. Пожалуйста, попробуйте позже.');
+  }
+}
+
 // ---------- Message handler ----------
 
 bot.on('message', async (msg) => {
@@ -491,33 +528,53 @@ bot.on('message', async (msg) => {
     return;
   }
 
+  await processQuery(chatId, userMessage);
+});
+
+// ---------- Voice handler ----------
+
+bot.on('voice', async (msg) => {
+  const chatId = msg.chat.id;
+
+  // Регистрацию проходим текстом
+  if (awaitingName.has(chatId)) {
+    await bot.sendMessage(chatId, 'Пожалуйста, введите имя и фамилию текстом.');
+    return;
+  }
+
+  let filePath;
   try {
     await bot.sendChatAction(chatId, 'typing');
 
-    const [history, manager] = await Promise.all([
-      getHistory(chatId),
-      getManager(chatId),
-    ]);
+    // Скачиваем голосовой файл во временную папку
+    filePath = await bot.downloadFile(msg.voice.file_id, os.tmpdir());
 
-    await Promise.all([
-      saveMessage(chatId, 'user', userMessage),
-      saveAnalytics(chatId, manager?.full_name ?? 'Неизвестный', userMessage),
-    ]);
+    // Транскрибация через Groq Whisper
+    const transcription = await groq.audio.transcriptions.create({
+      file: fs.createReadStream(filePath),
+      model: 'whisper-large-v3',
+    });
+    const text = (transcription.text || '').trim();
 
-    const messages = [...history, { role: 'user', content: userMessage }];
+    if (!text) {
+      await bot.sendMessage(chatId, '🤷 Не удалось распознать голосовое сообщение. Попробуйте ещё раз.');
+      return;
+    }
 
-    const systemPrompt = roleplaySessions.has(chatId)
-      ? `Ты играешь роль потенциального клиента компании Nomiqa. Ты заинтересован в продуктах и услугах, но задаёшь уточняющие вопросы и иногда возражаешь. Веди себя как реальный клиент: интересуйся ценами, сроками, гарантиями и условиями. Иногда будь скептичен, иногда заинтересован. Не раскрывай, что ты AI. Отвечай только на русском языке.`
-      : process.env.SYSTEM_PROMPT;
+    // Показываем менеджеру, что бот понял
+    await bot.sendMessage(chatId, `🎤 Распознал: ${text}`);
 
-    const reply = await askClaude(messages, systemPrompt);
-    await saveMessage(chatId, 'assistant', reply);
-    await bot.sendMessage(chatId, reply);
+    // Дальше — как обычный текстовый запрос
+    await processQuery(chatId, text);
   } catch (err) {
-    const errLine = `[${new Date().toISOString()}] chat_id=${chatId} ${err?.status ?? ''} ${err?.message ?? err}\n`;
-    console.error('Error processing message:', err);
+    const errLine = `[${new Date().toISOString()}] chat_id=${chatId} voice ${err?.status ?? ''} ${err?.message ?? err}\n`;
+    console.error('Voice processing error:', err);
     fs.appendFileSync('error.log', errLine);
-    await bot.sendMessage(chatId, '❌ Произошла ошибка. Пожалуйста, попробуйте позже.');
+    await bot.sendMessage(chatId, '❌ Не удалось обработать голосовое сообщение. Попробуйте позже.');
+  } finally {
+    if (filePath) {
+      try { fs.unlinkSync(filePath); } catch (_) { /* файл уже удалён */ }
+    }
   }
 });
 
