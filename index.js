@@ -549,6 +549,14 @@ bot.on('voice', async (msg) => {
     // Скачиваем голосовой файл во временную папку
     filePath = await bot.downloadFile(msg.voice.file_id, os.tmpdir());
 
+    // Telegram сохраняет голосовые как .oga, но Groq принимает только .ogg
+    // (формат тот же, отличается только расширение) — переименовываем
+    if (!filePath.toLowerCase().endsWith('.ogg')) {
+      const oggPath = filePath.replace(/\.[^.]+$/, '') + '.ogg';
+      fs.renameSync(filePath, oggPath);
+      filePath = oggPath;
+    }
+
     // Транскрибация через Groq Whisper
     const transcription = await groq.audio.transcriptions.create({
       file: fs.createReadStream(filePath),
