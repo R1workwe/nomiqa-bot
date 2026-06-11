@@ -44,7 +44,28 @@ async function saveManager(chatId, fullName) {
 
 // ---------- Analytics ----------
 
+// Приветствия и короткие реплики, которые не считаем за осмысленный запрос
+const GREETINGS = new Set([
+  'привет', 'приветик', 'приветствую', 'здравствуй', 'здравствуйте',
+  'добрый день', 'доброе утро', 'добрый вечер', 'хай',
+  'спасибо', 'спс', 'благодарю', 'спасибо большое', 'пожалуйста',
+  'да', 'ага', 'угу', 'нет', 'не', 'ок', 'окей', 'хорошо', 'понятно', 'ясно',
+  'hi', 'hello', 'hey', 'ok', 'okay', 'yes', 'no', 'thanks', 'thank you', 'thx',
+]);
+
+// true, если сообщение стоит сохранять/показывать в аналитике
+function isMeaningfulQuery(text) {
+  const t = (text || '').trim();
+  if (!t) return false;
+  if (t.startsWith('/')) return false;          // команды
+  if (t.length < 10) return false;              // слишком короткие
+  const normalized = t.toLowerCase().replace(/[!.,?…\s]+$/g, '').trim();
+  if (GREETINGS.has(normalized)) return false;  // приветствия и пр.
+  return true;
+}
+
 async function saveAnalytics(chatId, managerName, queryText) {
+  if (!isMeaningfulQuery(queryText)) return;
   const { error } = await supabase
     .from('analytics')
     .insert({ chat_id: String(chatId), manager_name: managerName, query_text: queryText });
@@ -101,6 +122,36 @@ async function askClaude(messages, systemPrompt) {
   return response.content[0].text;
 }
 
+// ---------- Helpers ----------
+
+// Отправляет длинный текст, разбивая на части по границам строк, если он > 4000 символов
+async function sendLongMessage(chatId, text, options) {
+  const LIMIT = 4000;
+  if (text.length <= LIMIT) {
+    await bot.sendMessage(chatId, text, options);
+    return;
+  }
+
+  const lines = text.split('\n');
+  let chunk = '';
+  for (const line of lines) {
+    // Одна строка длиннее лимита — режем жёстко
+    if (line.length > LIMIT) {
+      if (chunk) { await bot.sendMessage(chatId, chunk, options); chunk = ''; }
+      for (let i = 0; i < line.length; i += LIMIT) {
+        await bot.sendMessage(chatId, line.slice(i, i + LIMIT), options);
+      }
+      continue;
+    }
+    if (chunk.length + line.length + 1 > LIMIT) {
+      await bot.sendMessage(chatId, chunk, options);
+      chunk = '';
+    }
+    chunk += (chunk ? '\n' : '') + line;
+  }
+  if (chunk) await bot.sendMessage(chatId, chunk, options);
+}
+
 // ---------- Commands ----------
 
 bot.onText(/\/start/, async (msg) => {
@@ -145,6 +196,7 @@ bot.onText(/\/help/, async (msg) => {
     '/roleplay — Хочешь потренироваться? Сыграю роль клиента перед реальной встречей\n\n' +
     '/forget — Начинаешь новый вопрос? Нажми чтобы очистить историю\n\n' +
     '/stats — Статистика (только для администраторов)\n\n' +
+    '/manager — Запросы конкретного менеджера, напр. /manager Егор (для администраторов)\n\n' +
     '━━━━━━━━━━━━━━━\n\n' +
     '⚠️ ВАЖНО:\n\n' +
     'Всегда пиши КТО клиент, ОТКУДА, какой БЮДЖЕТ и что УЖЕ было.\n\n' +
@@ -279,7 +331,9 @@ bot.onText(/\/stats/, async (msg) => {
         .select('chat_id, full_name'),
     ]);
 
-    const analytics = rows || [];
+    // Отфильтровываем команды, короткие реплики и приветствия
+    // (в т.ч. старые записи, сохранённые до введения фильтра)
+    const analytics = (rows || []).filter((r) => isMeaningfulQuery(r.query_text));
     const managers = mgrRows || [];
 
     // Топ-10 популярных запросов за 30 дней (по частоте)
@@ -310,8 +364,7 @@ bot.onText(/\/stats/, async (msg) => {
       text += '_Нет данных_\n';
     } else {
       top10.forEach(([q, count], i) => {
-        const preview = q.length > 60 ? q.slice(0, 60) + '…' : q;
-        text += `${i + 1}. (${count}) ${preview}\n`;
+        text += `${i + 1}. (${count}) ${q}\n`;
       });
     }
 
@@ -328,10 +381,82 @@ bot.onText(/\/stats/, async (msg) => {
       }
     }
 
-    await bot.sendMessage(chatId, text, { parse_mode: 'Markdown' });
+    await sendLongMessage(chatId, text, { parse_mode: 'Markdown' });
   } catch (err) {
     console.error('/stats error:', err);
     await bot.sendMessage(chatId, '❌ Ошибка при получении статистики.');
+  }
+});
+
+bot.onText(/^\/manager(?:@\w+)?(?:\s+(.+))?$/, async (msg, match) => {
+  const chatId = msg.chat.id;
+
+  try {
+    const me = await getManager(chatId);
+    if (me?.role !== 'admin') {
+      await bot.sendMessage(chatId, 'У вас нет доступа к статистике');
+      return;
+    }
+
+    const query = (match[1] || '').trim();
+    if (!query) {
+      await bot.sendMessage(chatId, 'Использование: /manager <часть имени>\nНапример: /manager Егор');
+      return;
+    }
+
+    await bot.sendChatAction(chatId, 'typing');
+
+    // Поиск менеджера по частичному совпадению full_name
+    const { data: found } = await supabase
+      .from('managers')
+      .select('chat_id, full_name')
+      .ilike('full_name', `%${query}%`);
+
+    const matches = found || [];
+    if (matches.length === 0) {
+      await bot.sendMessage(chatId, `Менеджер по запросу «${query}» не найден.`);
+      return;
+    }
+    if (matches.length > 1) {
+      const names = matches.map((m) => `• ${m.full_name}`).join('\n');
+      await bot.sendMessage(chatId, `Найдено несколько менеджеров — уточните запрос:\n${names}`);
+      return;
+    }
+
+    const target = matches[0];
+    const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+
+    // Берём с запасом, т.к. часть отсеется фильтром, затем оставляем 20 последних
+    const { data: rows } = await supabase
+      .from('analytics')
+      .select('query_text, created_at')
+      .eq('chat_id', String(target.chat_id))
+      .gte('created_at', since)
+      .order('created_at', { ascending: false })
+      .limit(200);
+
+    const queries = (rows || [])
+      .filter((r) => isMeaningfulQuery(r.query_text))
+      .slice(0, 20);
+
+    let text = `👤 *${target.full_name}* — запросы за 30 дней\n`;
+    if (queries.length === 0) {
+      text += '\n_Нет запросов за этот период_';
+    } else {
+      text += `_Показаны последние ${queries.length}_\n`;
+      queries.forEach((r) => {
+        const dt = new Date(r.created_at).toLocaleString('ru-RU', {
+          day: '2-digit', month: '2-digit', year: 'numeric',
+          hour: '2-digit', minute: '2-digit',
+        });
+        text += `\n🕒 ${dt}\n${r.query_text}\n`;
+      });
+    }
+
+    await sendLongMessage(chatId, text, { parse_mode: 'Markdown' });
+  } catch (err) {
+    console.error('/manager error:', err);
+    await bot.sendMessage(chatId, '❌ Ошибка при получении данных менеджера.');
   }
 });
 
@@ -405,6 +530,7 @@ bot.setMyCommands([
   { command: 'roleplay', description: 'Тренировка на клиенте' },
   { command: 'forget', description: 'Очистить историю диалога' },
   { command: 'stats', description: 'Статистика (для администраторов)' },
+  { command: 'manager', description: 'Запросы менеджера, напр. /manager Егор' },
   { command: 'help', description: 'Помощь и список команд' },
 ]).catch((err) => console.error('setMyCommands error:', err.message));
 
