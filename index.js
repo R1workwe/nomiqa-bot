@@ -134,12 +134,14 @@ bot.onText(/\/help/, async (msg) => {
     '4️⃣ Получи готовый план или текст сообщения\n\n' +
     '━━━━━━━━━━━━━━━\n\n' +
     'ЧТО УМЕЮ:\n\n' +
+    '/register — Зарегистрироваться: укажи имя и фамилию\n\n' +
     '/strategy — Не знаешь что делать с клиентом? Опиши его — дам план\n\n' +
     '/meeting — Провёл встречу? Расскажи как прошло — разберём ошибки и следующий шаг\n\n' +
     '/objection — Клиент сказал «дорого» или «подумаю»? Напиши что именно — дам ответ\n\n' +
     '/stuck — Клиент пропал или тянет время? Опиши ситуацию — найдём причину\n\n' +
     '/roleplay — Хочешь потренироваться? Сыграю роль клиента перед реальной встречей\n\n' +
     '/forget — Начинаешь новый вопрос? Нажми чтобы очистить историю\n\n' +
+    '/stats — Статистика (только для администраторов)\n\n' +
     '━━━━━━━━━━━━━━━\n\n' +
     '⚠️ ВАЖНО:\n\n' +
     'Всегда пиши КТО клиент, ОТКУДА, какой БЮДЖЕТ и что УЖЕ было.\n\n' +
@@ -390,5 +392,17 @@ bot.on('message', async (msg) => {
     await bot.sendMessage(chatId, '❌ Произошла ошибка. Пожалуйста, попробуйте позже.');
   }
 });
+
+bot.setMyCommands([
+  { command: 'register', description: 'Регистрация (имя и фамилия)' },
+  { command: 'strategy', description: 'План по клиенту' },
+  { command: 'meeting', description: 'Разбор встречи' },
+  { command: 'objection', description: 'Ответ на возражение' },
+  { command: 'stuck', description: 'Клиент пропал / тянет время' },
+  { command: 'roleplay', description: 'Тренировка на клиенте' },
+  { command: 'forget', description: 'Очистить историю диалога' },
+  { command: 'stats', description: 'Статистика (для администраторов)' },
+  { command: 'help', description: 'Помощь и список команд' },
+]).catch((err) => console.error('setMyCommands error:', err.message));
 
 console.log('🤖 Nomiqa Bot запущен!');
