@@ -14,8 +14,11 @@ const awaitingName = new Set(); // chat_ids ожидающих ввода име
 // ---------- Managers ----------
 
 function isAdmin(chatId) {
-  const adminId = process.env.ADMIN_CHAT_ID;
-  return Boolean(adminId) && String(chatId) === String(adminId);
+  const adminIds = (process.env.ADMIN_CHAT_IDS || '')
+    .split(',')
+    .map((id) => id.trim())
+    .filter(Boolean);
+  return adminIds.includes(String(chatId));
 }
 
 async function getManager(chatId) {
