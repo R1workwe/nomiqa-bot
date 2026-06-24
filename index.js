@@ -109,20 +109,55 @@ async function clearHistory(chatId) {
 
 // ---------- Claude ----------
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Статусы, при которых API перегружен и запрос стоит повторить
+const RETRYABLE_STATUSES = new Set([429, 503, 529]);
+
 async function askClaude(messages, systemPrompt) {
-  const response = await anthropic.messages.create({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 2000,
-    system: [
-      {
-        type: 'text',
-        text: systemPrompt,
-        cache_control: { type: 'ephemeral' }
+  const maxRetries = 3; // 3 повтора с задержкой 2, 4, 8 секунд
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await anthropic.messages.create(
+        {
+          model: 'claude-sonnet-4-6',
+          max_tokens: 2000,
+          system: [
+            {
+              type: 'text',
+              text: systemPrompt,
+              cache_control: { type: 'ephemeral' }
+            }
+          ],
+          messages,
+        },
+        // 30с таймаут на запрос; отключаем встроенные ретраи SDK — управляем сами
+        { timeout: 30000, maxRetries: 0 }
+      );
+      return response.content[0].text;
+    } catch (err) {
+      const isTimeout = err instanceof Anthropic.APIConnectionTimeoutError;
+      const isOverloaded = RETRYABLE_STATUSES.has(err?.status);
+
+      // Не повторяем при неретраебельных ошибках
+      if (!isTimeout && !isOverloaded) throw err;
+
+      // Исчерпали попытки — сигнализируем о перегрузке
+      if (attempt === maxRetries) {
+        const overloadErr = new Error('Anthropic API перегружен после повторных попыток');
+        overloadErr.overloaded = true;
+        overloadErr.cause = err;
+        throw overloadErr;
       }
-    ],
-    messages,
-  });
-  return response.content[0].text;
+
+      const delayMs = 2000 * 2 ** attempt; // 2с, 4с, 8с
+      console.warn(
+        `askClaude: попытка ${attempt + 1} не удалась (${isTimeout ? 'timeout' : err.status}), повтор через ${delayMs}мс`
+      );
+      await sleep(delayMs);
+    }
+  }
 }
 
 // ---------- Helpers ----------
@@ -493,7 +528,10 @@ async function processQuery(chatId, userMessage) {
     const errLine = `[${new Date().toISOString()}] chat_id=${chatId} ${err?.status ?? ''} ${err?.message ?? err}\n`;
     console.error('Error processing message:', err);
     fs.appendFileSync('error.log', errLine);
-    await bot.sendMessage(chatId, '❌ Произошла ошибка. Пожалуйста, попробуйте позже.');
+    const userText = err?.overloaded
+      ? '⏳ Сервер сейчас перегружен, попробуйте через минуту.'
+      : '❌ Произошла ошибка. Пожалуйста, попробуйте позже.';
+    await bot.sendMessage(chatId, userText);
   }
 }
 
