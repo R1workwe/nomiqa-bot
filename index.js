@@ -502,10 +502,12 @@ bot.onText(/^\/manager(?:@\w+)?(?:\s+(.+))?$/, async (msg, match) => {
 
 // Общий конвейер обработки запроса (текст или распознанная речь)
 async function processQuery(chatId, userMessage) {
+  let manager = null;
   try {
     await bot.sendChatAction(chatId, 'typing');
 
-    const [history, manager] = await Promise.all([
+    let history;
+    [history, manager] = await Promise.all([
       getHistory(chatId),
       getManager(chatId),
     ]);
@@ -528,6 +530,17 @@ async function processQuery(chatId, userMessage) {
     const errLine = `[${new Date().toISOString()}] chat_id=${chatId} ${err?.status ?? ''} ${err?.message ?? err}\n`;
     console.error('Error processing message:', err);
     fs.appendFileSync('error.log', errLine);
+
+    // Уведомление об ошибке отправляем только администратору
+    const ADMIN_ERROR_CHAT_ID = 611693717;
+    const who = manager?.full_name ?? chatId;
+    const errText = err?.message ?? String(err);
+    try {
+      await bot.sendMessage(ADMIN_ERROR_CHAT_ID, `⚠️ Ошибка у менеджера ${who}: ${errText}`);
+    } catch (notifyErr) {
+      console.error('Failed to send error notification:', notifyErr);
+    }
+
     const userText = err?.overloaded
       ? '⏳ Сервер сейчас перегружен, попробуйте через минуту.'
       : '❌ Произошла ошибка. Пожалуйста, попробуйте позже.';
